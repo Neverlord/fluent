@@ -1,0 +1,155 @@
+#!/bin/sh
+# Convenience wrapper for easily viewing/setting options that
+# the project's CMake scripts will recognize
+
+type cmake > /dev/null 2>&1 || {
+  echo "\
+This package requires CMake, please install it first, then you may
+use this configure script to access CMake equivalent functionality.\
+" >&2;
+  exit 1;
+}
+
+# Save some values for later before parsing the command line.
+if [ -n "$*" ]; then
+  args=$(printf " \"%s\"" $*)
+fi
+command="$0$args"
+sourcedir="$(cd "$(dirname "$0")" && pwd)"
+
+usage="\
+Usage: $0 [OPTION]... [VAR=VALUE]...
+
+  Installation directories:
+    --prefix=PREFIX         installation directory [/usr/local]
+
+  Build options:
+    --generator=GENERATOR   CMake generator to use (see cmake --help)
+    --build-type=DIR        CMake build type [RelWithDebInfo]
+    --build-dir=DIR         directory where to perform build [build]
+    --no-auto-libc++        do not automatically use libc++ with Clang
+
+  Debugging:
+    --enable-assertions     turn on assertions
+    --enable-asan           enable AddressSanitizer
+
+  Required packages in non-standard locations:
+    --with-caf=PATH         path to CAF install root or build directory
+"
+
+# Function to append a CMake cache entry definition to the
+# CMakeCacheEntries variable
+#   $1 is the cache entry variable name
+#   $2 is the cache entry variable type
+#   $3 is the cache entry variable value
+append_cache_entry() {
+  CMakeCacheEntries="$CMakeCacheEntries -D \"$1:$2=$3\""
+}
+
+# Set defaults
+builddir=build
+CMakeCacheEntries=""
+append_cache_entry CMAKE_INSTALL_PREFIX   PATH      /usr/local
+append_cache_entry CMAKE_BUILD_TYPE       STRING    RelWithDebInfo
+
+# Parse command line arguments.
+while [ $# -ne 0 ]; do
+  case "$1" in
+    -*=*)
+      optarg="$(echo "$1" | sed 's/[-_a-zA-Z0-9]*=//')"
+      ;;
+    *)
+      optarg=
+      ;;
+  esac
+  case "$1" in
+    --help|-h)
+      echo "${usage}" 1>&2
+      exit 1
+      ;;
+    --prefix=*)
+      append_cache_entry CALE_PREFIX PATH "$optarg"
+      append_cache_entry CMAKE_INSTALL_PREFIX PATH "$optarg"
+      ;;
+    --generator=*)
+      CMakeGenerator="$optarg"
+      ;;
+    --build-dir=*)
+      builddir="$optarg"
+      ;;
+    --build-type=*)
+      append_cache_entry CMAKE_BUILD_TYPE STRING "$optarg"
+      ;;
+    --no-auto-libc++)
+      append_cache_entry NO_AUTO_LIBCPP BOOL yes
+      ;;
+    --enable-assertions)
+      append_cache_entry CALE_ENABLE_ASSERTIONS BOOL true
+      ;;
+    --enable-asan)
+      append_cache_entry ENABLE_ADDRESS_SANITIZER BOOL true
+      ;;
+    --with-caf=*)
+      append_cache_entry CAF_ROOT_DIR PATH "$optarg"
+      ;;
+    *)
+      echo "Invalid option '$1'.  Try $0 --help to see available options."
+      exit 1
+      ;;
+  esac
+  shift
+done
+
+if [ -d "$builddir" ]; then
+  # If build directory exists, check if it has a CMake cache
+  if [ -f "$builddir/CMakeCache.txt" ]; then
+    # If the CMake cache exists, delete it so that this configuration
+    # is not tainted by a previous one
+    rm -f "$builddir/CMakeCache.txt"
+  fi
+else
+  mkdir -p "$builddir"
+fi
+
+cd "$builddir"
+
+# In order to support spaces in paths, we use eval to re-evaluate the command
+# line before passing it to CMake.
+cmake=cmake
+if [ -n "$CMakeGenerator" ]; then
+  cmake="$cmake -G \"$CMakeGenerator\""
+fi
+cmake="$cmake $CMakeCacheEntries \"$sourcedir\""
+eval $cmake
+
+printf "#!/bin/sh\n\n" > config.status
+printf "# Switch to the source of this build directory.\n" >> config.status
+printf "cd \"$sourcedir\"\n\n" >> config.status
+printf "# Invoke the command to configure this build.\n" >> config.status
+if [ -n "$CC" ]; then
+  printf 'CC="%s" ' "$CC" >> config.status
+fi
+if [ -n "$CXX" ]; then
+  printf 'CXX="%s" ' "$CXX" >> config.status
+fi
+if [ -n "$CXXFLAGS" ]; then
+  printf 'CXXFLAGS="%s" ' "$CXXFLAGS" >> config.status
+fi
+printf "$command\n" $@ >> config.status
+chmod u+x config.status
+
+makefile="$sourcedir/Makefile"
+if [ -f "$makefile" ]; then
+  if ! head -n 1 "$makefile" | cut -d ' ' -f 2- | grep -q "\"$builddir\""; then
+    sed -i.orig "s/\(DIRS=.*\)/\1 \"$builddir\"/" "$makefile"
+    rm "$makefile.orig"
+    echo "-- added \"$builddir\" to top-level Makefile" 1>&2
+  fi
+else
+  printf "DIRS= \"%s\" \n\n" "$builddir" > "$makefile"
+  if [ "$(uname -s)" = "FreeBSD" ]; then
+    printf ".include \".Makefile.BSD\"" >> "$makefile"
+  else
+    printf "include .Makefile.GNU" >> "$makefile"
+  fi
+fi
